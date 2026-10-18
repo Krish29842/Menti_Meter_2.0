@@ -11,15 +11,18 @@ import type {
   SessionStatus,
   StudentQuestionDTO,
 } from '../types/quiz';
-import { realtimeEngine } from '../services/realtimeEngine';
+import { realtimeEngine, localRealtimeEngine } from '../services/realtimeEngine';
 import { audioService } from '../services/audioEffects';
 import { AudioPlayer } from '../components/AudioPlayer';
+import { VideoPlayer } from '../components/VideoPlayer';
 import { TimerGauge } from '../components/TimerGauge';
 
 interface StudentLiveViewProps {
   participant: Participant;
   sessionId: string;
   onExit: () => void;
+  /** When true (split-screen demo) the local BroadcastChannel engine is used. */
+  useLocal?: boolean;
 }
 
 const OPTION_STYLES = [
@@ -65,6 +68,7 @@ export const StudentLiveView: React.FC<StudentLiveViewProps> = ({
   participant: initialParticipant,
   sessionId,
   onExit,
+  useLocal = false,
 }) => {
   const [participant, setParticipant] = useState<Participant>(initialParticipant);
   const [sessionStatus, setSessionStatus] = useState<SessionStatus>('lobby');
@@ -149,12 +153,20 @@ export const StudentLiveView: React.FC<StudentLiveViewProps> = ({
     setIsLocked(true);
     audioService.playTick();
 
-    realtimeEngine.submitAnswer(
-      sessionId,
-      participant.id,
-      currentQuestion.questionId,
-      optionId
-    );
+    if (useLocal) {
+      localRealtimeEngine.submitAnswer(
+        sessionId,
+        participant.id,
+        currentQuestion.questionId,
+        optionId
+      );
+    } else {
+      void realtimeEngine
+        .submitAnswer(sessionId, participant.id, currentQuestion.questionId, optionId)
+        .catch((err) => {
+          console.warn('[student-live] answer rejected', err);
+        });
+    }
   };
 
   // 1. LOBBY STATE
@@ -215,14 +227,26 @@ export const StudentLiveView: React.FC<StudentLiveViewProps> = ({
           </div>
         </div>
 
-        {/* Question Prompt */}
+        {/* Question Prompt & Media */}
         <div className="rounded-3xl border border-slate-800 bg-slate-900/90 p-5 sm:p-6 shadow-2xl backdrop-blur-xl mb-5">
           <h2 className="text-lg sm:text-xl font-black text-white text-center leading-snug">
             {currentQuestion.prompt}
           </h2>
 
+          {/* Video Display (with or without separate audio) */}
+          {currentQuestion.videoUrl && (
+            <div className="mt-4">
+              <VideoPlayer
+                src={currentQuestion.videoUrl}
+                autoPlay={true}
+                loop={true}
+                muted={false}
+              />
+            </div>
+          )}
+
           {/* Image Display */}
-          {currentQuestion.imageUrl && (
+          {currentQuestion.imageUrl && !currentQuestion.videoUrl && (
             <div className="mt-4 flex justify-center max-h-60 overflow-hidden rounded-2xl border border-slate-800 bg-black/40">
               <img
                 src={currentQuestion.imageUrl}
@@ -244,37 +268,84 @@ export const StudentLiveView: React.FC<StudentLiveViewProps> = ({
           )}
         </div>
 
-        {/* Answer Options Grid */}
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {currentQuestion.options.map((opt, i) => {
-            const style = OPTION_STYLES[i % OPTION_STYLES.length];
-            const isSelected = selectedOptionId === opt.id;
+        {/* Answer Options Grid (Text-only or Visual Card with Images/Videos) */}
+        {(() => {
+          const hasAnyOptionMedia = currentQuestion.options.some(
+            (o) => o.imageUrl || o.videoUrl
+          );
 
-            return (
-              <button
-                key={opt.id}
-                onClick={() => handleSelectOption(opt.id)}
-                disabled={isLocked}
-                className={`relative flex items-center gap-4 rounded-2xl p-4 sm:p-5 text-left font-bold text-white shadow-xl transition-all active:scale-95 disabled:cursor-not-allowed ${
-                  style.bg
-                } ${isSelected ? style.selected : isLocked ? 'opacity-40' : ''}`}
-              >
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-black/25 text-lg font-black text-white">
-                  {style.symbol}
-                </span>
-                <span className="text-base sm:text-lg font-bold leading-tight">
-                  {opt.text}
-                </span>
+          return (
+            <div
+              className={`grid gap-3.5 ${
+                hasAnyOptionMedia
+                  ? 'grid-cols-1 sm:grid-cols-2'
+                  : 'grid-cols-1 sm:grid-cols-2'
+              }`}
+            >
+              {currentQuestion.options.map((opt, i) => {
+                const style = OPTION_STYLES[i % OPTION_STYLES.length];
+                const isSelected = selectedOptionId === opt.id;
+                const hasMedia = !!(opt.imageUrl || opt.videoUrl);
 
-                {isSelected && (
-                  <span className="absolute right-4 top-4 flex h-6 w-6 items-center justify-center rounded-full bg-white text-slate-950 font-bold text-xs shadow-md animate-scale-in">
-                    ✓
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
+                return (
+                  <button
+                    key={opt.id}
+                    onClick={() => handleSelectOption(opt.id)}
+                    disabled={isLocked}
+                    className={`relative flex flex-col justify-between rounded-2xl p-4 text-left font-bold text-white shadow-xl transition-all active:scale-95 disabled:cursor-not-allowed ${
+                      style.bg
+                    } ${
+                      isSelected
+                        ? style.selected
+                        : isLocked
+                        ? 'opacity-40'
+                        : 'hover:brightness-110'
+                    }`}
+                  >
+                    {/* Option Header: Symbol + Label */}
+                    <div className="flex items-center gap-3 w-full">
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-black/25 text-base font-black text-white">
+                        {style.symbol}
+                      </span>
+                      <span className="text-base font-bold leading-tight flex-1">
+                        {opt.text}
+                      </span>
+
+                      {isSelected && (
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-slate-950 font-bold text-xs shadow-md animate-scale-in">
+                          ✓
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Option Image or Video Thumbnail (if present) */}
+                    {hasMedia && (
+                      <div className="mt-3 w-full rounded-xl overflow-hidden bg-black/50 border border-white/20">
+                        {opt.imageUrl && (
+                          <img
+                            src={opt.imageUrl}
+                            alt=""
+                            className="h-32 sm:h-40 w-full object-cover rounded-xl"
+                          />
+                        )}
+                        {opt.videoUrl && (
+                          <VideoPlayer
+                            src={opt.videoUrl}
+                            isThumbnail={true}
+                            muted={true}
+                            loop={true}
+                            autoPlay={true}
+                            className="h-32 sm:h-40 w-full"
+                          />
+                        )}
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         {/* Locked state alert */}
         {isLocked && (

@@ -1,0 +1,18 @@
+- `time_remaining` computed **server-side** = `deadline - submitted_at`
+- Clamped to `[0, time_limit]`
+- `BASE` configurable per quiz (default 1000)
+
+**Leaderboard storage:**
+- Redis Sorted Set: `leaderboard:{session_id}` → member = participant_id, score = cumulative points
+- Postgres `participant.total_score` is authoritative on session end (reconciled from responses)
+
+**Tie-breaking** (applied at read time):
+1. Higher total score
+2. More correct answers
+3. Lower cumulative submission time
+
+---
+
+## 4. Data Flow Diagrams (Textual)
+
+### 4.1 Host Uploads Question with Media

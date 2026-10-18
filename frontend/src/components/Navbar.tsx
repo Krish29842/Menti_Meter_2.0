@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Volume2,
   VolumeX,
@@ -12,20 +12,34 @@ import {
 } from 'lucide-react';
 import { audioService } from '../services/audioEffects';
 import { storageService } from '../services/storage';
+import { detectMode } from '../services/api';
 
 interface NavbarProps {
   currentView: string;
   onNavigate: (view: string) => void;
   onOpenSplitDemo: () => void;
+  onOpenAuthModal: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   currentView,
   onNavigate,
   onOpenSplitDemo,
+  onOpenAuthModal,
 }) => {
   const [soundOn, setSoundOn] = useState(audioService.isEnabled());
+  const [connectionMode, setConnectionMode] = useState<'remote' | 'local'>('remote');
   const currentUser = storageService.getCurrentUser();
+
+  useEffect(() => {
+    let mounted = true;
+    detectMode().then((mode) => {
+      if (mounted) setConnectionMode(mode);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const handleToggleSound = () => {
     const next = audioService.toggleSound();
@@ -106,6 +120,29 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Right Actions */}
         <div className="flex items-center gap-2 sm:gap-3">
+          {/* Connection Status Pill */}
+          <div
+            className={`hidden sm:flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold border ${
+              connectionMode === 'remote'
+                ? 'border-emerald-500/30 bg-emerald-950/40 text-emerald-400'
+                : 'border-amber-500/30 bg-amber-950/40 text-amber-400'
+            }`}
+            title={
+              connectionMode === 'remote'
+                ? 'Connected to QuizWave Backend (Socket.io + Express on port 4000)'
+                : 'Running in Local Multi-Tab Simulation Engine'
+            }
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${
+                connectionMode === 'remote'
+                  ? 'bg-emerald-400 animate-pulse'
+                  : 'bg-amber-400'
+              }`}
+            />
+            <span>{connectionMode === 'remote' ? 'Backend Live' : 'Local Mode'}</span>
+          </div>
+
           {/* Split Screen Demo Toggle */}
           <button
             onClick={onOpenSplitDemo}
@@ -133,7 +170,11 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* User profile / Demo login */}
           {currentUser ? (
             <div className="flex items-center gap-2">
-              <div className="hidden lg:flex items-center gap-2 rounded-xl bg-slate-900 px-3 py-1.5 border border-slate-800">
+              <div
+                onClick={onOpenAuthModal}
+                className="hidden lg:flex items-center gap-2 rounded-xl bg-slate-900 px-3 py-1.5 border border-slate-800 cursor-pointer hover:border-slate-700 transition-colors"
+                title="Account details"
+              >
                 <div className="h-5 w-5 rounded-full bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-[10px] font-bold">
                   {currentUser.name.charAt(0)}
                 </div>
@@ -151,10 +192,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           ) : (
             <button
-              onClick={() => {
-                storageService.quickDemoLogin();
-                onNavigate('host-dashboard');
-              }}
+              onClick={onOpenAuthModal}
               className="flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 active:scale-95 transition-all shadow-md shadow-indigo-600/30"
             >
               <User className="h-3.5 w-3.5" />

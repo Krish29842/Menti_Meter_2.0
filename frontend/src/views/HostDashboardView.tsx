@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Plus,
   Play,
@@ -8,23 +8,52 @@ import {
   HelpCircle,
   Headphones,
   Image as ImageIcon,
+  Video as VideoIcon,
   Zap,
 } from 'lucide-react';
 import type { Quiz } from '../types/quiz';
 import { storageService } from '../services/storage';
 import { realtimeEngine } from '../services/realtimeEngine';
 
+import { getHostToken } from '../services/api';
+
 interface HostDashboardViewProps {
   onNavigate: (view: string, params?: any) => void;
+  onOpenAuthModal?: () => void;
 }
 
 export const HostDashboardView: React.FC<HostDashboardViewProps> = ({
   onNavigate,
+  onOpenAuthModal,
 }) => {
-  const [quizzes, setQuizzes] = useState<Quiz[]>(storageService.getQuizzes());
+  const [quizzes, setQuizzes] = useState<Quiz[]>([]);
   const currentUser = storageService.getCurrentUser();
 
-  const handleCreateQuiz = () => {
+  useEffect(() => {
+    let mounted = true;
+    const init = async () => {
+      let user = storageService.getCurrentUser();
+      if (!user || !getHostToken()) {
+        try {
+          user = await storageService.quickDemoLogin();
+        } catch {
+          // offline local fallback
+        }
+      }
+      try {
+        const list = await storageService.getQuizzes();
+        if (mounted) setQuizzes(list);
+      } catch (err) {
+        console.warn('[dashboard] getQuizzes error', err);
+      }
+    };
+    void init();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const handleCreateQuiz = async () => {
     const newQuiz: Quiz = {
       id: 'quiz-' + Math.random().toString(36).substring(2, 9),
       hostId: currentUser?.id || 'host-1',
@@ -49,30 +78,40 @@ export const HostDashboardView: React.FC<HostDashboardViewProps> = ({
         },
       ],
     };
-    storageService.saveQuiz(newQuiz);
-    setQuizzes(storageService.getQuizzes());
-    onNavigate('quiz-builder', { quizId: newQuiz.id });
-  };
-
-  const handleLaunchSession = (quizId: string) => {
-    const session = realtimeEngine.createSession(
-      quizId,
-      currentUser?.id || 'host-1'
-    );
-    onNavigate('host-live', { sessionId: session.id, quizId });
-  };
-
-  const handleDuplicate = (id: string) => {
-    const copy = storageService.duplicateQuiz(id);
-    if (copy) {
-      setQuizzes(storageService.getQuizzes());
+    try {
+      const saved = await storageService.saveQuiz(newQuiz);
+      setQuizzes(await storageService.getQuizzes());
+      onNavigate('quiz-builder', { quizId: saved.id });
+    } catch (err) {
+      console.error('[dashboard] create quiz failed', err);
+      alert('Could not create the quiz. Is the backend running?');
     }
   };
 
-  const handleDelete = (id: string) => {
+  const handleLaunchSession = async (quizId: string) => {
+    try {
+      const session = await realtimeEngine.createSession(
+        quizId,
+        currentUser?.id || 'host-1'
+      );
+      onNavigate('host-live', { sessionId: session.id, quizId });
+    } catch (err: any) {
+      console.error('[dashboard] launch failed', err);
+      alert(err?.message || 'Could not launch the session.');
+    }
+  };
+
+  const handleDuplicate = async (id: string) => {
+    const copy = await storageService.duplicateQuiz(id);
+    if (copy) {
+      setQuizzes(await storageService.getQuizzes());
+    }
+  };
+
+  const handleDelete = async (id: string) => {
     if (confirm('Are you sure you want to delete this quiz?')) {
-      storageService.deleteQuiz(id);
-      setQuizzes(storageService.getQuizzes());
+      await storageService.deleteQuiz(id);
+      setQuizzes(await storageService.getQuizzes());
     }
   };
 
@@ -94,7 +133,22 @@ export const HostDashboardView: React.FC<HostDashboardViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {currentUser && (
+            <div className="flex items-center gap-2 rounded-2xl border border-slate-800 bg-slate-900/80 px-3.5 py-2 text-xs text-slate-300">
+              <span className="h-2 w-2 rounded-full bg-emerald-400"></span>
+              <span className="font-semibold text-slate-200">{currentUser.name}</span>
+              {onOpenAuthModal && (
+                <button
+                  onClick={onOpenAuthModal}
+                  className="ml-1 text-[11px] font-bold text-indigo-400 hover:text-indigo-300 underline"
+                >
+                  Switch
+                </button>
+              )}
+            </div>
+          )}
+
           <button
             onClick={handleCreateQuiz}
             className="flex items-center gap-2 rounded-2xl bg-gradient-to-r from-indigo-600 to-cyan-600 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-600/30 hover:opacity-95 active:scale-95 transition-all"
@@ -127,6 +181,10 @@ export const HostDashboardView: React.FC<HostDashboardViewProps> = ({
           {quizzes.map((quiz) => {
             const hasAudio = quiz.questions.some((q) => !!q.audioUrl);
             const hasImage = quiz.questions.some((q) => !!q.imageUrl);
+            const hasVideo = quiz.questions.some((q) => !!q.videoUrl);
+            const hasOptionMedia = quiz.questions.some((q) =>
+              q.options.some((o) => o.imageUrl || o.videoUrl)
+            );
 
             return (
               <div
@@ -156,6 +214,13 @@ export const HostDashboardView: React.FC<HostDashboardViewProps> = ({
                       {quiz.basePoints} pts base
                     </span>
 
+                    {hasVideo && (
+                      <span className="inline-flex items-center gap-1 rounded-xl bg-cyan-500/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-300 border border-cyan-500/20">
+                        <VideoIcon className="h-3 w-3 text-cyan-400" />
+                        Video Clues
+                      </span>
+                    )}
+
                     {hasAudio && (
                       <span className="inline-flex items-center gap-1 rounded-xl bg-indigo-500/10 px-2.5 py-1 text-[11px] font-semibold text-indigo-300 border border-indigo-500/20">
                         <Headphones className="h-3 w-3 text-indigo-400" />
@@ -163,10 +228,16 @@ export const HostDashboardView: React.FC<HostDashboardViewProps> = ({
                       </span>
                     )}
 
-                    {hasImage && (
+                    {hasImage && !hasVideo && (
                       <span className="inline-flex items-center gap-1 rounded-xl bg-cyan-500/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-300 border border-cyan-500/20">
                         <ImageIcon className="h-3 w-3 text-cyan-400" />
                         Images
+                      </span>
+                    )}
+
+                    {hasOptionMedia && (
+                      <span className="inline-flex items-center gap-1 rounded-xl bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold text-amber-300 border border-amber-500/20">
+                        Option Media
                       </span>
                     )}
                   </div>

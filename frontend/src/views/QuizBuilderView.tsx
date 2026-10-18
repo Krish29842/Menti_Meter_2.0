@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   Plus,
@@ -7,6 +7,7 @@ import {
   Circle,
   Clock,
   Image as ImageIcon,
+  Video as VideoIcon,
   Headphones,
   Upload,
   Eye,
@@ -18,7 +19,9 @@ import {
 } from 'lucide-react';
 import type { AnswerOption, Question, Quiz } from '../types/quiz';
 import { storageService } from '../services/storage';
+import { isRemote, mediaApi } from '../services/api';
 import { AudioPlayer } from '../components/AudioPlayer';
+import { VideoPlayer } from '../components/VideoPlayer';
 
 interface QuizBuilderViewProps {
   quizId: string;
@@ -34,37 +37,81 @@ const OPTION_COLORS = [
   { bg: 'bg-cyan-500/10', border: 'border-cyan-500/40', badge: 'bg-cyan-600', text: 'text-cyan-400', label: '★ Teal' },
 ];
 
+/** Backend upload when reachable, FileReader data-URL fallback otherwise. */
+async function resolveMediaUrl(file: File, maxMB: number): Promise<string> {
+  if (file.size > maxMB * 1024 * 1024) {
+    throw new Error(`File exceeds ${maxMB} MB limit.`);
+  }
+  if (await isRemote()) {
+    try {
+      return await mediaApi.upload(file);
+    } catch (err) {
+      console.warn('[builder] upload failed, embedding locally', err);
+    }
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error('Could not read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
 export const QuizBuilderView: React.FC<QuizBuilderViewProps> = ({
   quizId,
   onNavigate,
 }) => {
-  const [quiz, setQuiz] = useState<Quiz | null>(() => {
-    return (
-      storageService.getQuizById(quizId) || {
-        id: quizId,
-        hostId: 'host-1',
-        title: 'New Quiz',
-        description: '',
-        basePoints: 1000,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        questions: [],
-      }
-    );
-  });
+  const [quiz, setQuiz] = useState<Quiz | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    storageService
+      .getQuizById(quizId)
+      .then((loaded) => {
+        if (!mounted) return;
+        setQuiz(
+          loaded || {
+            id: quizId,
+            hostId: 'host-1',
+            title: 'New Quiz',
+            description: '',
+            basePoints: 1000,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            questions: [],
+          }
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      mounted = false;
+    };
+  }, [quizId]);
 
   const [activeQuestionIdx, setActiveQuestionIdx] = useState<number>(0);
   const [showPreviewModal, setShowPreviewModal] = useState<boolean>(false);
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
+  const [visualMediaType, setVisualMediaType] = useState<'image' | 'video'>('image');
 
-  if (!quiz) return null;
+  if (!quiz) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center text-sm text-slate-400">
+        Loading quiz…
+      </div>
+    );
+  }
 
   const currentQuestion: Question | undefined = quiz.questions[activeQuestionIdx];
 
-  const handleSave = () => {
-    storageService.saveQuiz(quiz);
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 2000);
+  const handleSave = async () => {
+    try {
+      const saved = await storageService.saveQuiz(quiz);
+      setQuiz(saved);
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2000);
+    } catch (err: any) {
+      alert(err?.message || 'Could not save the quiz.');
+    }
   };
 
   const handleAddQuestion = () => {
@@ -146,41 +193,82 @@ export const QuizBuilderView: React.FC<QuizBuilderViewProps> = ({
     if (!currentQuestion || currentQuestion.options.length <= 2) return;
     const optToRemove = currentQuestion.options[optIdx];
     let newOptions = currentQuestion.options.filter((_, i) => i !== optIdx);
-    // If we removed the correct option, default first option to correct
     if (optToRemove.isCorrect && newOptions.length > 0) {
       newOptions[0].isCorrect = true;
     }
     updateCurrentQuestion({ options: newOptions });
   };
 
-  // Image Upload handler (reads as base64 Data URL)
-  const handleImageFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      alert('Image size exceeds 5 MB limit (FR-H2).');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      updateCurrentQuestion({ imageUrl: reader.result as string });
+  // Option media updates
+  const handleUpdateOptionMedia = (
+    optIdx: number,
+    field: 'imageUrl' | 'videoUrl',
+    value: string
+  ) => {
+    if (!currentQuestion) return;
+    const newOptions = [...currentQuestion.options];
+    newOptions[optIdx] = {
+      ...newOptions[optIdx],
+      // If setting image, clear video; if setting video, clear image
+      imageUrl: field === 'imageUrl' ? value : undefined,
+      videoUrl: field === 'videoUrl' ? value : undefined,
     };
-    reader.readAsDataURL(file);
+    updateCurrentQuestion({ options: newOptions });
   };
 
-  // Audio Upload handler (reads as base64 Data URL)
-  const handleAudioFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleOptionFileUpload = async (
+    optIdx: number,
+    type: 'image' | 'video',
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > 10 * 1024 * 1024) {
-      alert('Audio size exceeds 10 MB limit (FR-H2).');
-      return;
+    try {
+      const url = await resolveMediaUrl(file, type === 'image' ? 5 : 25);
+      handleUpdateOptionMedia(
+        optIdx,
+        type === 'image' ? 'imageUrl' : 'videoUrl',
+        url
+      );
+    } catch (err: any) {
+      alert(err?.message || 'Upload failed.');
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      updateCurrentQuestion({ audioUrl: reader.result as string });
-    };
-    reader.readAsDataURL(file);
+  };
+
+  // Question Image Upload
+  const handleImageFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const url = await resolveMediaUrl(file, 5);
+      updateCurrentQuestion({ imageUrl: url, videoUrl: '' });
+    } catch (err: any) {
+      alert(err?.message || 'Upload failed.');
+    }
+  };
+
+  // Question Video Upload
+  const handleVideoFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const url = await resolveMediaUrl(file, 25);
+      updateCurrentQuestion({ videoUrl: url, imageUrl: '' });
+    } catch (err: any) {
+      alert(err?.message || 'Upload failed.');
+    }
+  };
+
+  // Question Audio Upload
+  const handleAudioFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const url = await resolveMediaUrl(file, 10);
+      updateCurrentQuestion({ audioUrl: url });
+    } catch (err: any) {
+      alert(err?.message || 'Upload failed.');
+    }
   };
 
   return (
@@ -204,7 +292,7 @@ export const QuizBuilderView: React.FC<QuizBuilderViewProps> = ({
               placeholder="Quiz Title"
             />
             <p className="text-xs text-slate-400">
-              {quiz.questions.length} questions • Speed-weighted scoring
+              {quiz.questions.length} questions • Speed-weighted scoring • Rich Media Options
             </p>
           </div>
         </div>
@@ -260,6 +348,11 @@ export const QuizBuilderView: React.FC<QuizBuilderViewProps> = ({
           <div className="flex flex-col gap-2 max-h-[600px] overflow-y-auto pr-1">
             {quiz.questions.map((q, idx) => {
               const isActive = idx === activeQuestionIdx;
+              const hasVideo = !!q.videoUrl;
+              const hasImage = !!q.imageUrl;
+              const hasAudio = !!q.audioUrl;
+              const hasOptMedia = q.options.some((o) => o.imageUrl || o.videoUrl);
+
               return (
                 <div
                   key={q.id || idx}
@@ -285,30 +378,50 @@ export const QuizBuilderView: React.FC<QuizBuilderViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Move Up/Down Controls */}
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleMoveQuestion(idx, 'up');
-                      }}
-                      disabled={idx === 0}
-                      className="p-1 text-slate-400 hover:text-white disabled:opacity-30"
-                      title="Move up"
-                    >
-                      <ArrowUp className="h-3 w-3" />
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleMoveQuestion(idx, 'down');
-                      }}
-                      disabled={idx === quiz.questions.length - 1}
-                      className="p-1 text-slate-400 hover:text-white disabled:opacity-30"
-                      title="Move down"
-                    >
-                      <ArrowDown className="h-3 w-3" />
-                    </button>
+                  <div className="flex items-center gap-1">
+                    {hasVideo && (
+                      <span title="Question Video">
+                        <VideoIcon className="h-3 w-3 text-cyan-400" />
+                      </span>
+                    )}
+                    {hasImage && !hasVideo && (
+                      <span title="Question Image">
+                        <ImageIcon className="h-3 w-3 text-cyan-400" />
+                      </span>
+                    )}
+                    {hasAudio && (
+                      <span title="Question Audio">
+                        <Headphones className="h-3 w-3 text-indigo-400" />
+                      </span>
+                    )}
+                    {hasOptMedia && (
+                      <span className="flex h-1.5 w-1.5 rounded-full bg-amber-400" title="Options have images/videos" />
+                    )}
+
+                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity ml-1">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleMoveQuestion(idx, 'up');
+                        }}
+                        disabled={idx === 0}
+                        className="p-1 text-slate-400 hover:text-white disabled:opacity-30"
+                        title="Move up"
+                      >
+                        <ArrowUp className="h-3 w-3" />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleMoveQuestion(idx, 'down');
+                        }}
+                        disabled={idx === quiz.questions.length - 1}
+                        className="p-1 text-slate-400 hover:text-white disabled:opacity-30"
+                        title="Move down"
+                      >
+                        <ArrowDown className="h-3 w-3" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
@@ -367,76 +480,155 @@ export const QuizBuilderView: React.FC<QuizBuilderViewProps> = ({
                 </button>
               </div>
 
-              {/* Media Configuration: Image & Audio */}
-              <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
-                {/* Image Section */}
+              {/* Question Media Section: Image/Video (with or without audio) */}
+              <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                {/* Visual Media (Image OR Video) */}
                 <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
                   <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-300">
-                      <ImageIcon className="h-4 w-4 text-cyan-400" />
-                      <span>Image Clue (Optional)</span>
+                    <div className="flex items-center gap-2">
+                      <div className="flex rounded-xl bg-slate-900 p-1 border border-slate-800">
+                        <button
+                          type="button"
+                          onClick={() => setVisualMediaType('image')}
+                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                            visualMediaType === 'image'
+                              ? 'bg-cyan-600 text-white'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          <ImageIcon className="h-3.5 w-3.5" />
+                          <span>Image</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setVisualMediaType('video')}
+                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                            visualMediaType === 'video'
+                              ? 'bg-cyan-600 text-white'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          <VideoIcon className="h-3.5 w-3.5" />
+                          <span>Video</span>
+                        </button>
+                      </div>
                     </div>
-                    {currentQuestion.imageUrl && (
+
+                    {(currentQuestion.imageUrl || currentQuestion.videoUrl) && (
                       <button
-                        onClick={() => updateCurrentQuestion({ imageUrl: '' })}
+                        onClick={() =>
+                          updateCurrentQuestion({ imageUrl: '', videoUrl: '' })
+                        }
                         className="text-[11px] text-rose-400 hover:underline"
                       >
-                        Remove
+                        Remove Visual
                       </button>
                     )}
                   </div>
 
-                  {currentQuestion.imageUrl ? (
-                    <div className="relative group overflow-hidden rounded-xl border border-slate-700 max-h-48 flex items-center justify-center bg-black/40">
-                      <img
-                        src={currentQuestion.imageUrl}
-                        alt="Question media preview"
-                        className="max-h-48 w-full object-contain"
-                      />
+                  {/* Image View / Upload */}
+                  {visualMediaType === 'image' && (
+                    <div>
+                      {currentQuestion.imageUrl ? (
+                        <div className="relative group overflow-hidden rounded-xl border border-slate-700 max-h-48 flex items-center justify-center bg-black/40">
+                          <img
+                            src={currentQuestion.imageUrl}
+                            alt="Question image"
+                            className="max-h-48 w-full object-contain"
+                          />
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <input
+                            type="url"
+                            placeholder="Paste image URL (https://...)"
+                            value={currentQuestion.imageUrl || ''}
+                            onChange={(e) =>
+                              updateCurrentQuestion({
+                                imageUrl: e.target.value,
+                                videoUrl: '',
+                              })
+                            }
+                            className="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-cyan-500 focus:outline-none"
+                          />
+                          <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-slate-700 bg-slate-900/40 p-3 text-xs text-slate-400 hover:border-cyan-500 hover:text-cyan-400 transition-colors">
+                            <Upload className="h-3.5 w-3.5" />
+                            <span>Upload Image File (max 5 MB)</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={handleImageFileUpload}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+                      )}
                     </div>
-                  ) : (
-                    <div className="space-y-3">
-                      <input
-                        type="url"
-                        placeholder="Paste image URL (https://...)"
-                        value={currentQuestion.imageUrl || ''}
-                        onChange={(e) => updateCurrentQuestion({ imageUrl: e.target.value })}
-                        className="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-cyan-500 focus:outline-none"
-                      />
-                      <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-slate-700 bg-slate-900/40 p-3 text-xs text-slate-400 hover:border-cyan-500 hover:text-cyan-400 transition-colors">
-                        <Upload className="h-3.5 w-3.5" />
-                        <span>Upload Image File (max 5 MB)</span>
-                        <input
-                          type="file"
-                          accept="image/*"
-                          onChange={handleImageFileUpload}
-                          className="hidden"
-                        />
-                      </label>
+                  )}
+
+                  {/* Video View / Upload */}
+                  {visualMediaType === 'video' && (
+                    <div>
+                      {currentQuestion.videoUrl ? (
+                        <div className="space-y-2">
+                          <VideoPlayer
+                            src={currentQuestion.videoUrl}
+                            autoPlay={true}
+                            loop={true}
+                            muted={false}
+                            className="max-h-48"
+                          />
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <input
+                            type="url"
+                            placeholder="Paste video URL (.mp4 / .webm)"
+                            value={currentQuestion.videoUrl || ''}
+                            onChange={(e) =>
+                              updateCurrentQuestion({
+                                videoUrl: e.target.value,
+                                imageUrl: '',
+                              })
+                            }
+                            className="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-cyan-500 focus:outline-none"
+                          />
+                          <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-slate-700 bg-slate-900/40 p-3 text-xs text-slate-400 hover:border-cyan-500 hover:text-cyan-400 transition-colors">
+                            <Upload className="h-3.5 w-3.5" />
+                            <span>Upload Video File (max 25 MB)</span>
+                            <input
+                              type="file"
+                              accept="video/*"
+                              onChange={handleVideoFileUpload}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
 
-                {/* Audio Section */}
+                {/* Separate Audio Clue (Host can include or omit audio!) */}
                 <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-300">
                       <Headphones className="h-4 w-4 text-indigo-400" />
-                      <span>Audio Clue (Optional)</span>
+                      <span>Audio Clue (With or Without Audio)</span>
                     </div>
                     {currentQuestion.audioUrl && (
                       <button
                         onClick={() => updateCurrentQuestion({ audioUrl: '' })}
                         className="text-[11px] text-rose-400 hover:underline"
                       >
-                        Remove
+                        Remove Audio
                       </button>
                     )}
                   </div>
 
                   {currentQuestion.audioUrl ? (
                     <div className="space-y-2">
-                      <AudioPlayer src={currentQuestion.audioUrl} title="Audio Preview" />
+                      <AudioPlayer src={currentQuestion.audioUrl} title="Audio Clue Preview" />
                     </div>
                   ) : (
                     <div className="space-y-3">
@@ -471,7 +663,7 @@ export const QuizBuilderView: React.FC<QuizBuilderViewProps> = ({
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  {[10, 15, 20, 30, 45, 60].map((sec) => (
+                  {[10, 15, 20, 25, 30, 45, 60].map((sec) => (
                     <button
                       key={sec}
                       onClick={() => updateCurrentQuestion({ timeLimitSec: sec })}
@@ -487,15 +679,15 @@ export const QuizBuilderView: React.FC<QuizBuilderViewProps> = ({
                 </div>
               </div>
 
-              {/* Answer Options (2-6 options) */}
+              {/* Answer Options (with Images / Videos support!) */}
               <div className="mt-6">
                 <div className="flex items-center justify-between mb-3">
                   <div>
                     <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                      Answer Choices (Select exactly one correct)
+                      Answer Choices (With Text, Images, or Videos)
                     </h4>
                     <p className="text-[11px] text-slate-400">
-                      Tap the circle checkmark to mark the winning answer
+                      Attach an image or video to any option for visual trivia!
                     </p>
                   </div>
                   {currentQuestion.options.length < 6 && (
@@ -508,59 +700,163 @@ export const QuizBuilderView: React.FC<QuizBuilderViewProps> = ({
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   {currentQuestion.options.map((option, optIdx) => {
                     const colorScheme = OPTION_COLORS[optIdx % OPTION_COLORS.length];
+                    const hasMedia = !!(option.imageUrl || option.videoUrl);
+
                     return (
                       <div
                         key={option.id}
-                        className={`relative flex items-center gap-3 rounded-2xl border p-3 transition-all ${
+                        className={`relative flex flex-col rounded-2xl border p-3.5 transition-all ${
                           colorScheme.bg
                         } ${colorScheme.border} ${
-                          option.isCorrect ? 'ring-2 ring-emerald-500/80' : ''
+                          option.isCorrect ? 'ring-2 ring-emerald-500/80 shadow-lg' : ''
                         }`}
                       >
-                        {/* Option Symbol Badge */}
-                        <span
-                          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-xs font-black text-white shadow-sm ${colorScheme.badge}`}
-                        >
-                          {colorScheme.label.split(' ')[0]}
-                        </span>
-
-                        {/* Input text */}
-                        <input
-                          type="text"
-                          value={option.text}
-                          onChange={(e) =>
-                            handleOptionTextChange(optIdx, e.target.value)
-                          }
-                          className="flex-1 bg-transparent text-sm font-semibold text-white focus:outline-none"
-                          placeholder={`Option ${optIdx + 1}`}
-                        />
-
-                        {/* Correct Toggle Button */}
-                        <button
-                          onClick={() => handleSetCorrectOption(option.id)}
-                          className="p-1 transition-transform active:scale-90"
-                          title={option.isCorrect ? 'Correct answer' : 'Mark as correct'}
-                        >
-                          {option.isCorrect ? (
-                            <CheckCircle2 className="h-6 w-6 text-emerald-400 fill-emerald-500/20" />
-                          ) : (
-                            <Circle className="h-6 w-6 text-slate-600 hover:text-slate-400" />
-                          )}
-                        </button>
-
-                        {/* Remove Option if > 2 */}
-                        {currentQuestion.options.length > 2 && (
-                          <button
-                            onClick={() => handleRemoveOption(optIdx)}
-                            className="p-1 text-slate-500 hover:text-rose-400"
-                            title="Remove choice"
+                        {/* Top Row: Symbol Badge + Text Input + Correct Toggle + Delete */}
+                        <div className="flex items-center gap-2.5">
+                          <span
+                            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-xs font-black text-white shadow-sm ${colorScheme.badge}`}
                           >
-                            <X className="h-4 w-4" />
+                            {colorScheme.label.split(' ')[0]}
+                          </span>
+
+                          <input
+                            type="text"
+                            value={option.text}
+                            onChange={(e) =>
+                              handleOptionTextChange(optIdx, e.target.value)
+                            }
+                            className="flex-1 bg-transparent text-sm font-semibold text-white focus:outline-none placeholder-slate-500"
+                            placeholder={`Choice ${optIdx + 1} text`}
+                          />
+
+                          {/* Correct Toggle Button */}
+                          <button
+                            type="button"
+                            onClick={() => handleSetCorrectOption(option.id)}
+                            className="p-1 transition-transform active:scale-90"
+                            title={option.isCorrect ? 'Marked Correct' : 'Click to make Correct'}
+                          >
+                            {option.isCorrect ? (
+                              <CheckCircle2 className="h-6 w-6 text-emerald-400 fill-emerald-500/20" />
+                            ) : (
+                              <Circle className="h-6 w-6 text-slate-600 hover:text-slate-400" />
+                            )}
                           </button>
+
+                          {currentQuestion.options.length > 2 && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveOption(optIdx)}
+                              className="p-1 text-slate-500 hover:text-rose-400"
+                              title="Remove choice"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Option Media Preview (if attached) */}
+                        {hasMedia && (
+                          <div className="relative mt-3 rounded-xl overflow-hidden border border-slate-700 bg-black/60 max-h-36 flex items-center justify-center group">
+                            {option.imageUrl && (
+                              <img
+                                src={option.imageUrl}
+                                alt={`Option ${optIdx + 1} visual`}
+                                className="max-h-36 w-full object-cover rounded-xl"
+                              />
+                            )}
+                            {option.videoUrl && (
+                              <VideoPlayer
+                                src={option.videoUrl}
+                                autoPlay={true}
+                                loop={true}
+                                muted={true}
+                                isThumbnail={true}
+                                className="max-h-36 w-full"
+                              />
+                            )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleUpdateOptionMedia(optIdx, 'imageUrl', '')
+                              }
+                              className="absolute top-1.5 right-1.5 rounded-lg bg-black/70 p-1 text-rose-400 hover:text-rose-300"
+                              title="Remove media"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
                         )}
+
+                        {/* Option Media Toolbar (Add Image or Video to this option) */}
+                        <div className="mt-3 flex items-center justify-between border-t border-slate-800/80 pt-2 text-[11px]">
+                          <div className="flex items-center gap-2">
+                            {/* Attach Image button */}
+                            <label className="flex items-center gap-1 cursor-pointer text-slate-400 hover:text-cyan-400">
+                              <ImageIcon className="h-3 w-3" />
+                              <span>Image</span>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                onChange={(e) =>
+                                  handleOptionFileUpload(optIdx, 'image', e)
+                                }
+                                className="hidden"
+                              />
+                            </label>
+
+                            <span>•</span>
+
+                            {/* Attach Video button */}
+                            <label className="flex items-center gap-1 cursor-pointer text-slate-400 hover:text-cyan-400">
+                              <VideoIcon className="h-3 w-3" />
+                              <span>Video</span>
+                              <input
+                                type="file"
+                                accept="video/*"
+                                onChange={(e) =>
+                                  handleOptionFileUpload(optIdx, 'video', e)
+                                }
+                                className="hidden"
+                              />
+                            </label>
+
+                            <span>•</span>
+
+                            {/* URL input prompt */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const url = prompt(
+                                  'Enter direct Image or Video URL for this choice:'
+                                );
+                                if (url) {
+                                  const isVid =
+                                    url.endsWith('.mp4') ||
+                                    url.endsWith('.webm') ||
+                                    url.includes('video');
+                                  handleUpdateOptionMedia(
+                                    optIdx,
+                                    isVid ? 'videoUrl' : 'imageUrl',
+                                    url
+                                  );
+                                }
+                              }}
+                              className="text-slate-400 hover:text-white"
+                            >
+                              Paste URL
+                            </button>
+                          </div>
+
+                          {option.isCorrect && (
+                            <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider">
+                              Correct Choice
+                            </span>
+                          )}
+                        </div>
                       </div>
                     );
                   })}
@@ -578,12 +874,12 @@ export const QuizBuilderView: React.FC<QuizBuilderViewProps> = ({
       {/* Preview Modal */}
       {showPreviewModal && currentQuestion && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm animate-fade-in">
-          <div className="relative w-full max-w-xl rounded-3xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+          <div className="relative w-full max-w-2xl rounded-3xl border border-slate-700 bg-slate-900 p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
               <div className="flex items-center gap-2">
                 <Sparkles className="h-4 w-4 text-cyan-400" />
                 <span className="text-sm font-bold text-white">
-                  Student Screen Preview
+                  Student Screen Preview (With Video & Option Media)
                 </span>
               </div>
               <button
@@ -594,35 +890,70 @@ export const QuizBuilderView: React.FC<QuizBuilderViewProps> = ({
               </button>
             </div>
 
-            <div className="rounded-2xl bg-slate-950 p-4 border border-slate-800 space-y-4">
+            <div className="rounded-2xl bg-slate-950 p-5 border border-slate-800 space-y-4">
               <h3 className="text-lg font-bold text-white text-center">
                 {currentQuestion.prompt}
               </h3>
 
-              {currentQuestion.imageUrl && (
-                <div className="flex justify-center max-h-48 overflow-hidden rounded-xl">
-                  <img
-                    src={currentQuestion.imageUrl}
-                    alt="Preview"
-                    className="max-h-48 object-contain rounded-xl"
+              {/* Question Video Preview */}
+              {currentQuestion.videoUrl && (
+                <div className="flex justify-center max-h-56 overflow-hidden rounded-xl">
+                  <VideoPlayer
+                    src={currentQuestion.videoUrl}
+                    autoPlay={true}
+                    loop={true}
+                    className="max-h-56 w-full"
                   />
                 </div>
               )}
 
+              {/* Question Image Preview */}
+              {currentQuestion.imageUrl && !currentQuestion.videoUrl && (
+                <div className="flex justify-center max-h-52 overflow-hidden rounded-xl">
+                  <img
+                    src={currentQuestion.imageUrl}
+                    alt="Preview"
+                    className="max-h-52 object-contain rounded-xl"
+                  />
+                </div>
+              )}
+
+              {/* Audio Clue Preview */}
               {currentQuestion.audioUrl && (
                 <AudioPlayer src={currentQuestion.audioUrl} title="Audio Clue" />
               )}
 
+              {/* Options Grid with Media */}
               <div className="grid grid-cols-2 gap-3 pt-2">
                 {currentQuestion.options.map((opt, i) => {
                   const col = OPTION_COLORS[i % OPTION_COLORS.length];
                   return (
                     <div
                       key={opt.id}
-                      className={`flex items-center gap-2.5 rounded-xl p-3 font-bold text-xs ${col.badge} text-white shadow-md`}
+                      className={`flex flex-col gap-2 rounded-2xl p-3 font-bold text-xs ${col.badge} text-white shadow-md`}
                     >
-                      <span>{col.label.split(' ')[0]}</span>
-                      <span className="truncate">{opt.text}</span>
+                      <div className="flex items-center gap-2">
+                        <span>{col.label.split(' ')[0]}</span>
+                        <span className="truncate">{opt.text}</span>
+                      </div>
+
+                      {/* Option Image or Video Thumbnail */}
+                      {opt.imageUrl && (
+                        <img
+                          src={opt.imageUrl}
+                          alt=""
+                          className="h-24 w-full object-cover rounded-xl"
+                        />
+                      )}
+                      {opt.videoUrl && (
+                        <VideoPlayer
+                          src={opt.videoUrl}
+                          isThumbnail={true}
+                          muted={true}
+                          autoPlay={true}
+                          className="h-24 w-full"
+                        />
+                      )}
                     </div>
                   );
                 })}

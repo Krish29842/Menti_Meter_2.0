@@ -5,7 +5,12 @@
   "description": "Mentimeter-style live quiz platform with image and audio questions and speed-weighted leaderboard",
   "scripts": {
     "dev": "npm --prefix frontend run dev",
+    "dev:backend": "npm --prefix backend run dev",
     "build": "npm --prefix frontend run build",
+    "build:backend": "npm --prefix backend run build",
+    "typecheck:backend": "npm --prefix backend run typecheck",
+    "typecheck": "npm --prefix backend run typecheck",
+    "smoke": "npm --prefix backend run smoke",
     "preview": "npm --prefix frontend run preview"
   },
   "keywords": [

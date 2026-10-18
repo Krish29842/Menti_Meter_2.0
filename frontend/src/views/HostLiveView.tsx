@@ -19,34 +19,37 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import type { HostLiveStateDTO, LeaderboardEntry, Quiz, Session } from '../types/quiz';
-import { realtimeEngine } from '../services/realtimeEngine';
+import { realtimeEngine, localRealtimeEngine } from '../services/realtimeEngine';
 import { storageService } from '../services/storage';
 import { audioService } from '../services/audioEffects';
 import { TimerGauge } from '../components/TimerGauge';
 import { QRCodeModal } from '../components/QRCodeModal';
+import { sessionApi } from '../services/api';
 
 interface HostLiveViewProps {
   sessionId: string;
   quizId: string;
   onNavigate: (view: string, params?: any) => void;
+  /** When true (split-screen demo) the local BroadcastChannel engine is used. */
+  useLocal?: boolean;
 }
 
 export const HostLiveView: React.FC<HostLiveViewProps> = ({
   sessionId,
   quizId,
   onNavigate,
+  useLocal = false,
 }) => {
-  const [session] = useState<Session | null>(() =>
-    realtimeEngine.getSessionById(sessionId)
-  );
-  const [quiz] = useState<Quiz | null>(() => storageService.getQuizById(quizId) || null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [quiz, setQuiz] = useState<Quiz | null>(null);
+  const [postSessionResults, setPostSessionResults] = useState<any>(null);
 
   const [liveState, setLiveState] = useState<HostLiveStateDTO>({
     sessionId,
-    code: session?.code || '',
-    status: session?.status || 'lobby',
-    currentQuestionIndex: session?.currentQuestionIndex ?? -1,
-    totalQuestions: session?.totalQuestions || quiz?.questions.length || 0,
+    code: '',
+    status: 'lobby',
+    currentQuestionIndex: -1,
+    totalQuestions: 0,
     connectedStudentsCount: 0,
     answeredStudentsCount: 0,
     timeRemainingSec: 20,
@@ -57,6 +60,71 @@ export const HostLiveView: React.FC<HostLiveViewProps> = ({
   const [showQRModal, setShowQRModal] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [deadline, setDeadline] = useState<number>(Date.now() + 20000);
+
+  // Bootstrap: load session + quiz, bind to the realtime channel (remote mode)
+  useEffect(() => {
+    let mounted = true;
+
+    const load = async () => {
+      if (useLocal) {
+        const localSession = localRealtimeEngine.getSessionById(sessionId);
+        const localQuiz = storageService.getCachedQuizById(quizId);
+        if (!mounted) return;
+        if (localSession) {
+          setSession(localSession);
+          setLiveState((prev) => ({
+            ...prev,
+            code: localSession.code,
+            status: localSession.status,
+            currentQuestionIndex: localSession.currentQuestionIndex,
+            totalQuestions: localSession.totalQuestions,
+          }));
+        }
+        if (localQuiz) setQuiz(localQuiz);
+        return;
+      }
+
+      const [loadedSession, loadedQuiz] = await Promise.all([
+        realtimeEngine.getSessionById(sessionId),
+        storageService.getQuizById(quizId),
+      ]);
+      if (!mounted) return;
+      if (loadedSession) setSession(loadedSession);
+      if (loadedQuiz) setQuiz(loadedQuiz);
+
+      const bound = await realtimeEngine.bindHost(sessionId).catch(() => null);
+      if (!mounted || !bound) return;
+      const { hostState, lobby, session: boundSession } = bound as any;
+      if (boundSession) setSession(boundSession);
+      if (hostState) {
+        setLiveState((prev) => ({
+          ...prev,
+          ...hostState,
+          leaderboard:
+            hostState.leaderboard ??
+            (lobby?.leaderboard as LeaderboardEntry[]) ??
+            prev.leaderboard,
+        }));
+        if (hostState.status === 'question_open') {
+          setDeadline(Date.now() + (hostState.timeRemainingSec || 0) * 1000);
+        }
+      }
+
+      if (loadedSession?.status === 'ended' && !useLocal) {
+        try {
+          const res = await sessionApi.results(sessionId);
+          if (mounted && res?.results) setPostSessionResults(res.results);
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    void load();
+    return () => {
+      mounted = false;
+    };
+  }, [sessionId, quizId, useLocal]);
 
   // Subscribe to real-time events
   useEffect(() => {
@@ -119,6 +187,12 @@ export const HostLiveView: React.FC<HostLiveViewProps> = ({
           status: 'ended',
           leaderboard: msg.payload.finalLeaderboard || prev.leaderboard,
         }));
+        if (msg.payload.quiz) {
+          setQuiz(msg.payload.quiz);
+        }
+        if (msg.payload.results) {
+          setPostSessionResults(msg.payload.results);
+        }
         audioService.playFanfare();
         confetti({
           particleCount: 150,
@@ -132,25 +206,34 @@ export const HostLiveView: React.FC<HostLiveViewProps> = ({
   }, [sessionId]);
 
   const handleStartQuiz = () => {
-    realtimeEngine.startSession(sessionId);
+    void realtimeEngine.startSession(sessionId).catch((err) => {
+      console.error('[host-live] start failed', err);
+      alert(err?.message || 'Could not start the quiz.');
+    });
   };
 
   const handleNextQuestion = () => {
-    realtimeEngine.nextQuestion();
+    void realtimeEngine.nextQuestion(sessionId).catch((err) => {
+      console.error('[host-live] next failed', err);
+    });
   };
 
   const handleCloseQuestionEarly = () => {
-    realtimeEngine.closeQuestion();
+    void realtimeEngine.closeQuestion(sessionId).catch((err) => {
+      console.error('[host-live] close failed', err);
+    });
   };
 
   const handleEndQuiz = () => {
     if (confirm('Are you sure you want to end this live session?')) {
-      realtimeEngine.endSession(sessionId);
+      void realtimeEngine.endSession(sessionId).catch((err) => {
+        console.error('[host-live] end failed', err);
+      });
     }
   };
 
   const handleAddDemoBots = () => {
-    realtimeEngine.addDemoBotStudents(sessionId, 4);
+    void realtimeEngine.addDemoBotStudents(sessionId, 4).catch(() => undefined);
   };
 
   const handleCopyJoinLink = () => {
@@ -537,19 +620,102 @@ export const HostLiveView: React.FC<HostLiveViewProps> = ({
           <div className="space-y-3">
             {quiz.questions.map((q, idx) => {
               const correctOpt = q.options.find((o) => o.isCorrect);
+              const qStats = postSessionResults?.perQuestion?.find(
+                (p: any) => p.questionId === q.id || p.orderIndex === idx
+              );
+              const totalAnswers = qStats?.totalAnswered ?? 0;
+              const correctCount = qStats?.correctCount ?? 0;
+              const accuracy =
+                totalAnswers > 0 ? Math.round((correctCount / totalAnswers) * 100) : null;
+
               return (
                 <div
                   key={q.id || idx}
-                  className="rounded-2xl border border-slate-800 bg-slate-950 p-4"
+                  className="rounded-2xl border border-slate-800 bg-slate-950 p-4 space-y-3"
                 >
-                  <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-                    <span>Question {idx + 1}</span>
-                    <span>{q.timeLimitSec}s limit</span>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+                    <span className="font-semibold text-slate-300">
+                      Question {idx + 1} of {quiz.questions.length}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {accuracy !== null && (
+                        <span
+                          className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold border ${
+                            accuracy >= 70
+                              ? 'bg-emerald-950/60 text-emerald-400 border-emerald-500/40'
+                              : accuracy >= 40
+                              ? 'bg-amber-950/60 text-amber-400 border-amber-500/40'
+                              : 'bg-rose-950/60 text-rose-400 border-rose-500/40'
+                          }`}
+                        >
+                          {accuracy}% Accuracy ({correctCount}/{totalAnswers} correct)
+                        </span>
+                      )}
+                      <span>{q.timeLimitSec}s limit</span>
+                    </div>
                   </div>
+
                   <div className="text-sm font-bold text-white">{q.prompt}</div>
-                  <div className="mt-2 text-xs text-emerald-400 font-semibold flex items-center gap-1.5">
-                    <Check className="h-3.5 w-3.5" />
-                    Correct Answer: {correctOpt?.text}
+
+                  {/* Option Distribution Bars (FR-H4S) */}
+                  {qStats?.optionDistribution && totalAnswers > 0 && (
+                    <div className="mt-2 space-y-2 pt-2 border-t border-slate-900">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                        Student Responses Breakdown
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {q.options.map((opt) => {
+                          const count = qStats.optionDistribution[opt.id] ?? 0;
+                          const pct =
+                            totalAnswers > 0 ? Math.round((count / totalAnswers) * 100) : 0;
+                          return (
+                            <div
+                              key={opt.id}
+                              className={`rounded-xl p-2.5 text-xs border ${
+                                opt.isCorrect
+                                  ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                                  : 'bg-slate-900 border-slate-800 text-slate-300'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between font-semibold mb-1">
+                                <span className="truncate flex-1">
+                                  {opt.isCorrect && '✓ '}
+                                  {opt.text}
+                                </span>
+                                <span className="ml-2 font-mono text-[11px]">
+                                  {count} ({pct}%)
+                                </span>
+                              </div>
+                              <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                                <div
+                                  style={{ width: `${pct}%` }}
+                                  className={`h-full rounded-full transition-all duration-500 ${
+                                    opt.isCorrect ? 'bg-emerald-400' : 'bg-slate-500'
+                                  }`}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mt-2 text-xs text-emerald-400 font-semibold flex items-center gap-1.5 flex-wrap">
+                    <Check className="h-3.5 w-3.5 shrink-0" />
+                    <span>Correct Answer: {correctOpt?.text}</span>
+                    {correctOpt?.imageUrl && (
+                      <img
+                        src={correctOpt.imageUrl}
+                        alt=""
+                        className="h-8 w-8 object-cover rounded-md border border-emerald-500/40 ml-1.5"
+                      />
+                    )}
+                    {correctOpt?.videoUrl && (
+                      <span className="rounded-md bg-emerald-950 px-1.5 py-0.5 text-[10px] border border-emerald-500/40 ml-1.5">
+                        🎥 Video Option
+                      </span>
+                    )}
                   </div>
                 </div>
               );

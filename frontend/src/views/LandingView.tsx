@@ -17,11 +17,13 @@ import { storageService } from '../services/storage';
 interface LandingViewProps {
   onNavigate: (view: string, params?: any) => void;
   onOpenSplitDemo: () => void;
+  onOpenAuthModal?: () => void;
 }
 
 export const LandingView: React.FC<LandingViewProps> = ({
   onNavigate,
   onOpenSplitDemo,
+  onOpenAuthModal,
 }) => {
   const [pinInput, setPinInput] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
@@ -29,16 +31,20 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const handleJoinByPin = (e: React.FormEvent) => {
     e.preventDefault();
     const cleanPin = pinInput.trim().replace(/\D/g, '');
-    if (cleanPin.length < 4) {
+    if (!cleanPin || cleanPin.length < 4) {
       setErrorMsg('Please enter a valid 6-digit game PIN');
       return;
     }
     onNavigate('student-join', { pin: cleanPin });
   };
 
-  const handleHostStart = () => {
+  const handleHostStart = async () => {
     if (!storageService.getCurrentUser()) {
-      storageService.quickDemoLogin();
+      if (onOpenAuthModal) {
+        onOpenAuthModal();
+        return;
+      }
+      await storageService.quickDemoLogin();
     }
     onNavigate('host-dashboard');
   };

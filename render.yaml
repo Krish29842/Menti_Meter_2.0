@@ -1,0 +1,27 @@
+# Render Blueprint — QuizWave backend (system.md §5 stack)
+# Deploy: Render dashboard → New → Blueprint → select this repo.
+services:
+  - type: web
+    name: quizwave-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      # Set to your Vercel URL after the frontend deploys, e.g.
+      # https://quizwave.vercel.app,http://localhost:5173
+      - key: CORS_ORIGINS
+        sync: false
+      # In-memory adapters (zero setup). Swap to postgres/redis when provisioned.
+      - key: STORAGE_DRIVER
+        value: memory
+      - key: CACHE_DRIVER
+        value: memory
+      - key: MEDIA_DRIVER
+        value: local

@@ -8,6 +8,14 @@ import type {
   StudentQuestionDTO,
 } from '../types/quiz';
 import { storageService } from './storage';
+import {
+  API_URL,
+  detectMode,
+  getHostToken,
+  sessionApi,
+  setStudentToken,
+} from './api';
+import { io, type Socket } from 'socket.io-client';
 
 export type EventType =
   | 'SESSION_CREATED'
@@ -29,16 +37,18 @@ export interface NetworkMessage {
 
 type Listener = (msg: NetworkMessage) => void;
 
-class RealtimeEngine {
+// ===========================================================================
+// LOCAL ENGINE — BroadcastChannel multi-tab simulation (offline fallback)
+// ===========================================================================
+
+class LocalRealtimeEngine {
   private channel: BroadcastChannel | null = null;
-  private listeners: Set<Listener> = new Set();
+  private onNotify: ((msg: NetworkMessage) => void) | null = null;
   private isHost: boolean = false;
 
-  // Active in-memory session (Host authoritative engine)
   private currentSession: Session | null = null;
   private currentQuiz: Quiz | null = null;
   private participants: Map<string, Participant> = new Map();
-  // Question responses: questionId -> Map(participantId, { optionId, submittedAt, points, isCorrect })
   private roundResponses: Map<
     string,
     {
@@ -62,7 +72,6 @@ class RealtimeEngine {
       };
     }
 
-    // Also support storage event for cross-origin or older browsers
     if (typeof window !== 'undefined') {
       window.addEventListener('storage', (e) => {
         if (e.key === 'quizwave_last_bus_event' && e.newValue) {
@@ -78,15 +87,12 @@ class RealtimeEngine {
     }
   }
 
-  public subscribe(listener: Listener): () => void {
-    this.listeners.add(listener);
-    return () => {
-      this.listeners.delete(listener);
-    };
+  public setNotifier(fn: (msg: NetworkMessage) => void) {
+    this.onNotify = fn;
   }
 
   private notifyListeners(msg: NetworkMessage) {
-    this.listeners.forEach((l) => l(msg));
+    this.onNotify?.(msg);
   }
 
   private broadcast(type: EventType, sessionId: string, payload: any) {
@@ -96,15 +102,12 @@ class RealtimeEngine {
       payload,
       timestamp: Date.now(),
     };
-    // Local notification
     this.notifyListeners(msg);
 
-    // BroadcastChannel
     if (this.channel) {
       this.channel.postMessage(msg);
     }
 
-    // LocalStorage fallback
     try {
       localStorage.setItem('quizwave_last_bus_event', JSON.stringify(msg));
     } catch {
@@ -116,14 +119,13 @@ class RealtimeEngine {
 
   public createSession(quizId: string, hostId: string): Session {
     this.isHost = true;
-    const quiz = storageService.getQuizById(quizId);
+    const quiz = storageService.getCachedQuizById(quizId);
     if (!quiz) throw new Error('Quiz not found');
 
     this.currentQuiz = quiz;
     this.participants.clear();
     this.roundResponses.clear();
 
-    // Generate formatted 6-digit pin: e.g. "724-819"
     const randomPin = Math.floor(100000 + Math.random() * 900000).toString();
     const formattedCode = `${randomPin.substring(0, 3)}-${randomPin.substring(3)}`;
 
@@ -206,20 +208,24 @@ class RealtimeEngine {
     this.roundResponses.clear();
     this.saveSessionState(this.currentSession);
 
-    // 1. Student DTO (NO isCorrect property!)
     const studentDTO: StudentQuestionDTO = {
       questionId: question.id,
       orderIndex: questionIndex,
       totalQuestions: this.currentQuiz.questions.length,
       prompt: question.prompt,
       imageUrl: question.imageUrl,
+      videoUrl: question.videoUrl,
       audioUrl: question.audioUrl,
-      options: question.options.map((o) => ({ id: o.id, text: o.text })),
+      options: question.options.map((o) => ({
+        id: o.id,
+        text: o.text,
+        imageUrl: o.imageUrl,
+        videoUrl: o.videoUrl,
+      })),
       timeLimitSec: question.timeLimitSec,
       deadline,
     };
 
-    // 2. Host DTO (FR-H3S: HOST SEES ONLY LEADERBOARD / STATS, NOT QUESTION CONTENT!)
     const hostDTO: HostLiveStateDTO = this.buildHostLiveState();
 
     this.broadcast('QUESTION_OPEN', this.currentSession.id, {
@@ -230,11 +236,10 @@ class RealtimeEngine {
       timeLimitSec: question.timeLimitSec,
     });
 
-    // Server-authoritative timer
     if (this.questionTimer) clearTimeout(this.questionTimer);
     this.questionTimer = setTimeout(() => {
       this.closeQuestion();
-    }, question.timeLimitSec * 1000 + 300); // 300ms buffer
+    }, question.timeLimitSec * 1000 + 300);
   }
 
   public closeQuestion(): void {
@@ -249,7 +254,6 @@ class RealtimeEngine {
     this.currentSession.status = 'question_closed';
     this.saveSessionState(this.currentSession);
 
-    // Compute round statistics
     const currentQuestion = this.currentQuiz?.questions[
       this.currentSession.currentQuestionIndex
     ];
@@ -314,7 +318,7 @@ class RealtimeEngine {
     this.broadcast('SESSION_ENDED', sessionId, {
       finalLeaderboard,
       totalQuestions: this.currentSession.totalQuestions,
-      quiz: this.currentQuiz, // full quiz stats available after session ends (FR-H4S)
+      quiz: this.currentQuiz,
     });
   }
 
@@ -357,7 +361,6 @@ class RealtimeEngine {
     });
   }
 
-  // Add simulated bot students for easy 1-click testing by the host!
   public addDemoBotStudents(sessionId: string, count: number = 3): void {
     const botNames = [
       { name: 'Maya Explorer', avatar: '🦁' },
@@ -397,7 +400,6 @@ class RealtimeEngine {
       const participant = this.participants.get(participantId);
       if (!participant) return;
 
-      // Anti-cheat: 1 answer per question
       if (this.roundResponses.has(participantId)) return;
 
       const currentQ = this.currentQuiz?.questions[
@@ -408,8 +410,6 @@ class RealtimeEngine {
       const chosenOption = currentQ.options.find((o) => o.id === optionId);
       const isCorrect = chosenOption ? chosenOption.isCorrect : false;
 
-      // Architecture formula:
-      // points = round(BASE * (0.5 + 0.5 * (time_remaining / time_limit))) if correct, else 0
       const deadline = this.currentSession.deadline || submittedAt;
       const timeRemainingMs = Math.max(0, deadline - submittedAt);
       const timeRemainingSec = timeRemainingMs / 1000;
@@ -440,7 +440,6 @@ class RealtimeEngine {
         isCorrect,
       });
 
-      // Broadcast live answered counter update
       const hostDTO = this.buildHostLiveState();
       this.broadcast('LEADERBOARD_UPDATED', this.currentSession.id, {
         hostDTO,
@@ -449,7 +448,6 @@ class RealtimeEngine {
         totalParticipants: this.participants.size,
       });
 
-      // If all participants have answered, auto-close round!
       if (
         this.participants.size > 0 &&
         this.roundResponses.size >= this.participants.size
@@ -465,7 +463,6 @@ class RealtimeEngine {
 
   private calculateLeaderboard(): LeaderboardEntry[] {
     const list = Array.from(this.participants.values());
-    // Tie-breaking: 1) totalScore descending, 2) correctAnswersCount descending, 3) totalResponseTime ascending
     list.sort((a, b) => {
       if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
       if (b.correctAnswersCount !== a.correctAnswersCount)
@@ -528,4 +525,428 @@ class RealtimeEngine {
   }
 }
 
-export const realtimeEngine = new RealtimeEngine();
+export const localRealtimeEngine = new LocalRealtimeEngine();
+
+// ===========================================================================
+// REMOTE ENGINE — Socket.io gateway on the QuizWave backend
+// ===========================================================================
+
+const DEMO_BOTS = [
+  { name: 'Maya Explorer', avatar: '🦁' },
+  { name: 'Liam Rocket', avatar: '🚀' },
+  { name: 'Sophia Spark', avatar: '⚡' },
+  { name: 'Ethan Fox', avatar: '🦊' },
+  { name: 'Chloe Panda', avatar: '🐼' },
+  { name: 'Lucas Comet', avatar: '☄️' },
+];
+
+class RemoteRealtimeEngine {
+  private socket: Socket | null = null;
+  private currentSessionId: string | null = null;
+  private botTokens: string[] = [];
+  private onNotify: ((msg: NetworkMessage) => void) | null = null;
+
+  public setNotifier(fn: (msg: NetworkMessage) => void) {
+    this.onNotify = fn;
+  }
+
+  private notify(type: EventType, payload: any, sessionId?: string) {
+    const msg: NetworkMessage = {
+      type,
+      sessionId: sessionId || this.currentSessionId || '',
+      payload,
+      timestamp: Date.now(),
+    };
+    this.onNotify?.(msg);
+  }
+
+  private async ensureSocket(token: string | null): Promise<Socket> {
+    if (this.socket?.connected) return this.socket;
+    this.socket?.disconnect();
+    this.socket = io(API_URL, {
+      auth: token ? { token } : {},
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionDelay: 1000,
+    });
+
+    this.socket.on('session:created', (payload: any) => {
+      this.currentSessionId = payload.session.id;
+      this.notify('SESSION_CREATED', payload, payload.session.id);
+    });
+    this.socket.on('student:joined', (payload: any) => {
+      this.notify('STUDENT_JOINED', payload);
+      this.notify('LEADERBOARD_UPDATED', {
+        leaderboard: payload.leaderboard,
+        totalParticipants: payload.connectedStudentsCount,
+        answeredCount: 0,
+      });
+    });
+    this.socket.on('question:open', (payload: any) => {
+      if (payload.hostDTO && !payload.studentDTO) {
+        // Host channel — FR-H3S stripped payload
+        this.notify('QUESTION_OPEN', payload);
+        this.notify('SESSION_STARTED', {
+          currentQuestionIndex: payload.questionIndex,
+          totalQuestions: payload.hostDTO.totalQuestions,
+        });
+      }
+      if (payload.studentDTO) {
+        // Student channel — full question (no answer keys)
+        this.notify('QUESTION_OPEN', payload);
+        this.notify('SESSION_STARTED', {
+          currentQuestionIndex: payload.questionIndex,
+          totalQuestions: payload.studentDTO.totalQuestions,
+        });
+        this.scheduleBotAnswers(payload.studentDTO);
+      }
+    });
+    this.socket.on('leaderboard:update', (payload: any) => {
+      this.notify('LEADERBOARD_UPDATED', payload);
+    });
+    this.socket.on('question:closed', (payload: any) => {
+      this.notify('QUESTION_CLOSED', payload);
+    });
+    this.socket.on('session:ended', (payload: any) => {
+      this.botTokens = [];
+      this.notify('SESSION_ENDED', payload);
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Socket connection timeout')), 8000);
+      this.socket!.on('connect', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+      this.socket!.on('connect_error', (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+
+    return this.socket;
+  }
+
+  private emitAck(event: string, payload: unknown): Promise<any> {
+    return new Promise((resolve, reject) => {
+      if (!this.socket) return reject(new Error('Socket not connected'));
+      const timeout = setTimeout(
+        () => reject(new Error(`Timed out waiting for ${event}`)),
+        10000
+      );
+      this.socket.emit(event, payload, (response: any) => {
+        clearTimeout(timeout);
+        if (response?.ok) resolve(response.data);
+        else reject(Object.assign(new Error(response?.error || 'Request failed'), {
+          status: response?.status || 500,
+        }));
+      });
+    });
+  }
+
+  /** Demo bots answer automatically with random options after joining. */
+  private scheduleBotAnswers(dto: StudentQuestionDTO) {
+    if (this.botTokens.length === 0 || !this.currentSessionId) return;
+    const sessionId = this.currentSessionId;
+    this.botTokens.forEach((token, i) => {
+      const delay =
+        (0.2 + Math.random() * 0.55) * dto.timeLimitSec * 1000 + i * 150;
+      setTimeout(() => {
+        const option =
+          dto.options[Math.floor(Math.random() * dto.options.length)];
+        sessionApi
+          .answer(sessionId, dto.questionId, option.id, token)
+          .catch(() => undefined);
+      }, delay);
+    });
+  }
+
+  // ---- host-side operations ----
+
+  async createSession(quizId: string): Promise<Session> {
+    const hostToken = getHostToken();
+    if (!hostToken) {
+      throw Object.assign(new Error('Host login required'), { status: 401 });
+    }
+    const { session } = await sessionApi.create(quizId);
+    this.currentSessionId = session.id;
+    this.botTokens = [];
+    await this.ensureSocket(hostToken);
+    this.notify(
+      'SESSION_CREATED',
+      { session, quizTitle: undefined },
+      session.id
+    );
+    return session;
+  }
+
+  async bindHost(sessionId: string): Promise<{
+    hostState: HostLiveStateDTO;
+    lobby: { lobby: Participant[]; connectedStudentsCount: number };
+    session: Session;
+  }> {
+    const hostToken = getHostToken();
+    if (!hostToken) throw Object.assign(new Error('Host login required'), { status: 401 });
+    this.currentSessionId = sessionId;
+    await this.ensureSocket(hostToken);
+    const data = await this.emitAck('session:bind', { sessionId });
+    return data;
+  }
+
+  async getSessionById(sessionId: string): Promise<Session | null> {
+    try {
+      const { session } = await sessionApi.state(sessionId);
+      return session;
+    } catch {
+      return null;
+    }
+  }
+
+  async startSession(sessionId: string) {
+    this.currentSessionId = sessionId;
+    await this.emitAck('session:start', { sessionId });
+  }
+
+  async nextQuestion(sessionId: string) {
+    await this.emitAck('question:next', { sessionId });
+  }
+
+  async closeQuestion(sessionId: string) {
+    await this.emitAck('question:close', { sessionId });
+  }
+
+  async endSession(sessionId: string) {
+    await this.emitAck('session:end', { sessionId });
+  }
+
+  // ---- student-side operations ----
+
+  async getSessionByCode(code: string): Promise<Session | null> {
+    try {
+      const { session } = await sessionApi.codePreview(code);
+      return session;
+    } catch {
+      return null;
+    }
+  }
+
+  async joinByCode(
+    code: string,
+    displayName: string,
+    avatar: string
+  ): Promise<{ participant: Participant; session: Session }> {
+    const { token, participant, session } = await sessionApi.join(
+      code,
+      displayName,
+      avatar
+    );
+    setStudentToken(token);
+    this.currentSessionId = session.id;
+    await this.ensureSocket(token);
+
+    // Late join / reconnect: sync current question state (no answer keys).
+    try {
+      const state = await sessionApi.studentState(session.id);
+      if (
+        state.session?.status === 'question_open' &&
+        state.question &&
+        !state.answered
+      ) {
+        this.notify('QUESTION_OPEN', {
+          studentDTO: state.question,
+          questionIndex: state.question.orderIndex,
+          deadline: state.question.deadline,
+          timeLimitSec: state.question.timeLimitSec,
+        });
+      }
+      if (state.leaderboard) {
+        this.notify('LEADERBOARD_UPDATED', {
+          leaderboard: state.leaderboard,
+          totalParticipants: state.leaderboard.length,
+        });
+      }
+    } catch {
+      // state sync is best-effort
+    }
+
+    return { participant: participant as Participant, session };
+  }
+
+  async submitAnswer(
+    sessionId: string,
+    _participantId: string,
+    questionId: string,
+    optionId: string
+  ) {
+    try {
+      await this.emitAck('answer:submit', { sessionId, questionId, optionId });
+    } catch (err: any) {
+      // Duplicate / closed answers are expected races — swallow silently.
+      if (err?.status !== 409) throw err;
+    }
+  }
+
+  async addDemoBotStudents(count: number = 4) {
+    const bots = DEMO_BOTS.slice(0, count);
+    for (const bot of bots) {
+      try {
+        const { token } = await sessionApi.join(
+          (await this.codeForCurrentSession()) || '',
+          bot.name,
+          bot.avatar
+        );
+        this.botTokens.push(token);
+      } catch {
+        // ignore individual bot failures
+      }
+    }
+  }
+
+  private async codeForCurrentSession(): Promise<string | null> {
+    if (!this.currentSessionId) return null;
+    const s = await this.getSessionById(this.currentSessionId);
+    return s?.code ?? null;
+  }
+}
+
+const remoteEngine = new RemoteRealtimeEngine();
+
+// ===========================================================================
+// FACADE — remote (backend) first, local simulation as automatic fallback
+// ===========================================================================
+
+class RealtimeFacade {
+  private listeners: Set<Listener> = new Set();
+
+  constructor() {
+    localRealtimeEngine.setNotifier((msg) => this.dispatch(msg));
+    remoteEngine.setNotifier((msg) => this.dispatch(msg));
+  }
+
+  private dispatch(msg: NetworkMessage) {
+    this.listeners.forEach((l) => {
+      try {
+        l(msg);
+      } catch (err) {
+        console.error('[realtime] listener error', err);
+      }
+    });
+  }
+
+  public subscribe(listener: Listener): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private async remote(): Promise<boolean> {
+    return (await detectMode()) === 'remote';
+  }
+
+  // ---- host ----
+
+  async createSession(quizId: string, hostId: string): Promise<Session> {
+    if (await this.remote()) {
+      return remoteEngine.createSession(quizId);
+    }
+    return localRealtimeEngine.createSession(quizId, hostId);
+  }
+
+  async bindHost(sessionId: string) {
+    if (await this.remote()) {
+      return remoteEngine.bindHost(sessionId);
+    }
+    return null;
+  }
+
+  async getSessionById(sessionId: string): Promise<Session | null> {
+    if (await this.remote()) {
+      return remoteEngine.getSessionById(sessionId);
+    }
+    return localRealtimeEngine.getSessionById(sessionId);
+  }
+
+  async startSession(sessionId: string): Promise<void> {
+    if (await this.remote()) {
+      return remoteEngine.startSession(sessionId);
+    }
+    return localRealtimeEngine.startSession(sessionId);
+  }
+
+  async nextQuestion(sessionId: string): Promise<void> {
+    if (await this.remote()) {
+      return remoteEngine.nextQuestion(sessionId);
+    }
+    return localRealtimeEngine.nextQuestion();
+  }
+
+  async closeQuestion(sessionId: string): Promise<void> {
+    if (await this.remote()) {
+      return remoteEngine.closeQuestion(sessionId);
+    }
+    return localRealtimeEngine.closeQuestion();
+  }
+
+  async endSession(sessionId: string): Promise<void> {
+    if (await this.remote()) {
+      return remoteEngine.endSession(sessionId);
+    }
+    return localRealtimeEngine.endSession(sessionId);
+  }
+
+  async addDemoBotStudents(sessionId: string, count: number = 4): Promise<void> {
+    if (await this.remote()) {
+      return remoteEngine.addDemoBotStudents(count);
+    }
+    return localRealtimeEngine.addDemoBotStudents(sessionId, count);
+  }
+
+  // ---- student ----
+
+  async getSessionByCode(code: string): Promise<Session | null> {
+    if (await this.remote()) {
+      return remoteEngine.getSessionByCode(code);
+    }
+    return localRealtimeEngine.getSessionByCode(code);
+  }
+
+  async joinByCode(
+    code: string,
+    displayName: string,
+    avatar: string
+  ): Promise<{ participant: Participant; session: Session }> {
+    if (await this.remote()) {
+      return remoteEngine.joinByCode(code, displayName, avatar);
+    }
+    const session = localRealtimeEngine.getSessionByCode(code);
+    if (!session) {
+      throw new Error('No active session found with this PIN.');
+    }
+    const participant = localRealtimeEngine.joinSession(
+      session.id,
+      displayName,
+      avatar
+    );
+    return { participant, session };
+  }
+
+  async submitAnswer(
+    sessionId: string,
+    participantId: string,
+    questionId: string,
+    optionId: string
+  ): Promise<void> {
+    if (await this.remote()) {
+      return remoteEngine.submitAnswer(sessionId, participantId, questionId, optionId);
+    }
+    return localRealtimeEngine.submitAnswer(
+      sessionId,
+      participantId,
+      questionId,
+      optionId
+    );
+  }
+}
+
+export const realtimeEngine = new RealtimeFacade();

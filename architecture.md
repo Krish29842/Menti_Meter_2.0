@@ -57,14 +57,14 @@ QuizWave is designed as an event-driven, real-time interactive quiz platform sup
 
 | Component | Responsibility |
 |---|---|
-| **Host SPA** | Quiz builder, question creation with image/audio, live session controls, and live leaderboard display. **Host sees only the leaderboard and controls during live mode** (no question spoilers). |
-| **Student SPA** | Join lobby with 6-digit pin + name, view question prompt, play media (image/audio), countdown timer, submit answer, view instant score feedback and podium. Mobile-first design. |
+| **Host SPA** | Quiz builder, question creation with image/video (with or without audio) and option images/videos, live session controls, and live leaderboard display. **Host sees only the leaderboard and controls during live mode** (no question spoilers). |
+| **Student SPA** | Join lobby with 6-digit pin + name, view question prompt, play media (image/video/audio), interactive option media tiles (images/videos in answer choices), countdown timer, submit answer, view instant score feedback and podium. Mobile-first design. |
 | **API Gateway / LB** | TLS termination, routing, rate limiting, request validation. |
 | **Backend Service** | Business logic, JWT verification, session orchestration, scoring calculation. |
 | **WebSocket Gateway** | Low-latency state synchronization (`session:started`, `question:open`, `question:closed`, `leaderboard:update`, `session:ended`). |
 | **PostgreSQL** | Relational source of truth: users, quizzes, questions, answers, session archives, and final scores. |
 | **Redis** | In-memory session state, distributed locks (`SETNX`), room pub/sub across backend pods, and `ZSET` for instant $O(\log N)$ real-time leaderboard ranking. |
-| **Object Storage + CDN**| Secure storage of question images and audio files with signed URLs. |
+| **Object Storage + CDN**| Secure storage of question & option media files (images, videos, audio) with signed URLs. |
 
 ---
 

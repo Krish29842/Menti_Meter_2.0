@@ -10,6 +10,8 @@ export interface User {
 export interface AnswerOption {
   id: string;
   text: string;
+  imageUrl?: string;
+  videoUrl?: string;
   isCorrect: boolean;
 }
 
@@ -19,6 +21,7 @@ export interface Question {
   orderIndex: number;
   prompt: string;
   imageUrl?: string;
+  videoUrl?: string; // with or without audio
   audioUrl?: string;
   options: AnswerOption[];
   timeLimitSec: number;
@@ -109,8 +112,14 @@ export interface StudentQuestionDTO {
   totalQuestions: number;
   prompt: string;
   imageUrl?: string;
+  videoUrl?: string;
   audioUrl?: string;
-  options: { id: string; text: string }[]; // no isCorrect flag sent to student!
+  options: {
+    id: string;
+    text: string;
+    imageUrl?: string;
+    videoUrl?: string;
+  }[]; // no isCorrect flag sent to student!
   timeLimitSec: number;
   deadline: number;
 }

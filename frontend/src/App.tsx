@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Navbar } from './components/Navbar';
+import { HostAuthModal } from './components/HostAuthModal';
 import { SplitScreenDemo } from './components/SplitScreenDemo';
 import { LandingView } from './views/LandingView';
 import { HostDashboardView } from './views/HostDashboardView';
@@ -13,6 +14,7 @@ export const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<string>('landing');
   const [viewParams, setViewParams] = useState<any>({});
   const [splitDemoOpen, setSplitDemoOpen] = useState<boolean>(false);
+  const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
 
   // Active student participant state if playing
   const [activeParticipant, setActiveParticipant] = useState<Participant | null>(null);
@@ -52,6 +54,7 @@ export const App: React.FC = () => {
         currentView={currentView}
         onNavigate={handleNavigate}
         onOpenSplitDemo={() => setSplitDemoOpen(true)}
+        onOpenAuthModal={() => setAuthModalOpen(true)}
       />
 
       {/* Main View Router */}
@@ -60,11 +63,15 @@ export const App: React.FC = () => {
           <LandingView
             onNavigate={handleNavigate}
             onOpenSplitDemo={() => setSplitDemoOpen(true)}
+            onOpenAuthModal={() => setAuthModalOpen(true)}
           />
         )}
 
         {currentView === 'host-dashboard' && (
-          <HostDashboardView onNavigate={handleNavigate} />
+          <HostDashboardView
+            onNavigate={handleNavigate}
+            onOpenAuthModal={() => setAuthModalOpen(true)}
+          />
         )}
 
         {currentView === 'quiz-builder' && (
@@ -97,6 +104,15 @@ export const App: React.FC = () => {
           />
         )}
       </main>
+
+      {/* Host Auth Modal (FR-A1) */}
+      <HostAuthModal
+        isOpen={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+        onSuccess={() => {
+          handleNavigate('host-dashboard');
+        }}
+      />
 
       {/* Interactive Split-Screen Live Demo Modal */}
       <SplitScreenDemo

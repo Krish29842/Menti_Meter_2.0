@@ -11,12 +11,15 @@ A Mentimeter-style live quiz platform with two roles (Host & Student), multimedi
 - Each question supports:
   - Text prompt (required)
   - Image upload/URL (optional)
+  - Video upload/URL with or without audio (optional)
   - Audio/voice-note upload/URL (optional)
   - Multiple-choice answers (2–6 options) with one correct answer
+  - **Multimedia answer options**: Each option can have text, image, and/or video!
   - Per-question time limit (default 20s)
 - Host can launch a live quiz session
 - During a live session:
-  - Students see the current question, image, and can play audio
+  - Students see the current question, image/video, and can play audio
+  - Students see media in options (images or video clips) for visual decision making
   - Students submit an answer within a time limit
   - Host sees **only the leaderboard & session controls** (not the questions during live mode)
 - Leaderboard scoring: correct + faster = more points
@@ -25,7 +28,6 @@ A Mentimeter-style live quiz platform with two roles (Host & Student), multimedi
 ### Out of Scope (MVP)
 - Word clouds, open-ended text, polls (future)
 - Team mode / multiplayer grouping
-- Video questions
 - Mobile native apps (web responsive only)
 - Payments / subscriptions
 

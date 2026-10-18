@@ -1,0 +1,19 @@
+
+### Component Responsibilities
+
+| Component | Responsibility |
+|-----------|----------------|
+| **Host SPA** | Quiz builder, media upload, live leaderboard view (no question content in live mode) |
+| **Student SPA** | Join lobby, question view (image/audio/options), answer submission |
+| **API Gateway / LB** | TLS termination, routing, rate limiting |
+| **Backend Service** | All business logic; horizontally scalable, stateless |
+| **WebSocket Gateway** | Real-time push of question state & leaderboard deltas |
+| **PostgreSQL** | Source of truth: users, quizzes, questions, sessions, responses, scores |
+| **Redis** | Session live state, pub/sub fan-out across backend pods, distributed timers, leaderboard sorted sets |
+| **Object Storage + CDN** | Media files; CDN for low-latency streaming to students |
+
+---
+
+## 2. Real-Time Architecture
+
+Multiple backend pods must broadcast the same events to all clients in a session.

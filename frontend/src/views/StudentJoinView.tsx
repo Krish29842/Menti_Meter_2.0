@@ -23,7 +23,7 @@ export const StudentJoinView: React.FC<StudentJoinViewProps> = ({
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanPin = pin.trim().replace(/\D/g, '');
     if (!cleanPin || cleanPin.length < 4) {
@@ -38,23 +38,20 @@ export const StudentJoinView: React.FC<StudentJoinViewProps> = ({
     setLoading(true);
     setErrorMsg('');
 
-    // Locate active session by code
-    const session = realtimeEngine.getSessionByCode(cleanPin);
-    if (!session) {
+    try {
+      // Locate + join active session via the realtime engine
+      // (backend REST/socket.io when reachable, local bus otherwise).
+      const { participant, session } = await realtimeEngine.joinByCode(
+        cleanPin,
+        displayName.trim(),
+        selectedAvatar
+      );
+      setLoading(false);
+      onJoined(participant, session.id);
+    } catch {
       setErrorMsg('No active session found with this PIN. Check code and try again.');
       setLoading(false);
-      return;
     }
-
-    // Join session via real-time engine
-    const participant = realtimeEngine.joinSession(
-      session.id,
-      displayName.trim(),
-      selectedAvatar
-    );
-
-    setLoading(false);
-    onJoined(participant, session.id);
   };
 
   return (

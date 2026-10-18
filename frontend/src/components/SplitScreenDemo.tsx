@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { X, Layers, Smartphone, Monitor, RotateCcw } from 'lucide-react';
 import { HostLiveView } from '../views/HostLiveView';
 import { StudentLiveView } from '../views/StudentLiveView';
-import { realtimeEngine } from '../services/realtimeEngine';
+import { localRealtimeEngine } from '../services/realtimeEngine';
 import { storageService } from '../services/storage';
 import type { Participant, Quiz, Session } from '../types/quiz';
 
@@ -20,22 +20,22 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
   const [student1, setStudent1] = useState<Participant | null>(null);
 
   const initDemo = () => {
-    const quizzes = storageService.getQuizzes();
+    const quizzes = storageService.getCachedQuizzes();
     const targetQuiz = quizzes[0] || null;
     if (!targetQuiz) return;
     setQuiz(targetQuiz);
 
-    // Create session
-    const s = realtimeEngine.createSession(targetQuiz.id, 'host-demo');
+    // Create session on the LOCAL simulation bus (independent of backend)
+    const s = localRealtimeEngine.createSession(targetQuiz.id, 'host-demo');
     setSession(s);
 
     // Auto-join Student 1
-    const p1 = realtimeEngine.joinSession(s.id, 'Alex 🚀', '🚀');
+    const p1 = localRealtimeEngine.joinSession(s.id, 'Alex 🚀', '🚀');
     setStudent1(p1);
 
     // Add extra bot participants for realistic classroom crowd
     setTimeout(() => {
-      realtimeEngine.addDemoBotStudents(s.id, 3);
+      localRealtimeEngine.addDemoBotStudents(s.id, 3);
     }, 200);
   };
 
@@ -97,6 +97,7 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
               sessionId={session.id}
               quizId={quiz.id}
               onNavigate={() => onClose()}
+              useLocal={true}
             />
           </div>
         </div>
@@ -118,6 +119,7 @@ export const SplitScreenDemo: React.FC<SplitScreenDemoProps> = ({
                 participant={student1}
                 sessionId={session.id}
                 onExit={onClose}
+                useLocal={true}
               />
             </div>
 
