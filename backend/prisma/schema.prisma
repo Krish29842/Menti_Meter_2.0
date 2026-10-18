@@ -1,0 +1,142 @@
+// Prisma schema — QuizWave (PostgreSQL)
+// Mirrors backend/src/types/domain.ts; timestamps are epoch-ms BIGINT to match domain types.
+// Usage: set DATABASE_URL, then `npm run prisma:migrate` (dev) or `npm run prisma:deploy` (prod).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  host
+  student
+}
+
+enum SessionStatus {
+  lobby
+  question_open
+  question_closed
+  ended
+}
+
+model User {
+  id           String    @id
+  email        String    @unique
+  name         String
+  passwordHash String    @map("password_hash")
+  role         Role      @default(host)
+  createdAt    BigInt    @map("created_at")
+  quizzes      Quiz[]
+  sessions     Session[]
+
+  @@map("users")
+}
+
+model Quiz {
+  id          String     @id
+  hostId      String     @map("host_id")
+  title       String
+  description String     @default("")
+  basePoints  Int        @default(1000) @map("base_points")
+  createdAt   BigInt     @map("created_at")
+  updatedAt   BigInt     @map("updated_at")
+  host        User       @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  questions   Question[]
+  sessions    Session[]
+
+  @@index([hostId])
+  @@map("quizzes")
+}
+
+model Question {
+  id           String            @id
+  quizId       String            @map("quiz_id")
+  orderIndex   Int               @map("order_index")
+  prompt       String
+  imageUrl     String?           @map("image_url")
+  videoUrl     String?           @map("video_url")
+  audioUrl     String?           @map("audio_url")
+  timeLimitSec Int               @default(20) @map("time_limit_sec")
+  quiz         Quiz              @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  options      AnswerOption[]
+  responses    SessionResponse[]
+
+  @@unique([quizId, orderIndex])
+  @@map("questions")
+}
+
+model AnswerOption {
+  id         String   @id
+  questionId String   @map("question_id")
+  text       String
+  imageUrl   String?  @map("image_url")
+  videoUrl   String?  @map("video_url")
+  isCorrect  Boolean  @default(false) @map("is_correct")
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([questionId])
+  @@map("answer_options")
+}
+
+model Session {
+  id                   String            @id
+  quizId               String            @map("quiz_id")
+  hostId               String            @map("host_id")
+  code                 String            @unique
+  status               SessionStatus     @default(lobby)
+  currentQuestionIndex Int               @default(0) @map("current_question_index")
+  totalQuestions       Int               @map("total_questions")
+  startedAt            BigInt            @map("started_at")
+  deadline             BigInt?
+  timeLimitSec         Int?              @map("time_limit_sec")
+  quiz                 Quiz              @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  host                 User              @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  participants         Participant[]
+  responses            SessionResponse[]
+
+  @@index([hostId])
+  @@index([status])
+  @@map("sessions")
+}
+
+model Participant {
+  id                  String            @id
+  sessionId           String            @map("session_id")
+  displayName         String            @map("display_name")
+  avatar              String            @default("")
+  totalScore          Int               @default(0) @map("total_score")
+  joinedAt            BigInt            @map("joined_at")
+  correctAnswersCount Int               @default(0) @map("correct_answers_count")
+  lastDelta           Int               @default(0) @map("last_delta")
+  lastAnswerOptionId  String?           @map("last_answer_option_id")
+  lastIsCorrect       Boolean?          @map("last_is_correct")
+  totalResponseTime   Float             @default(0) @map("total_response_time")
+  session             Session           @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  responses           SessionResponse[]
+
+  @@index([sessionId])
+  @@map("participants")
+}
+
+// Persisted answer per participant per question (RoundResponse in domain types).
+model SessionResponse {
+  sessionId        String      @map("session_id")
+  participantId    String      @map("participant_id")
+  questionId       String      @map("question_id")
+  optionId         String      @map("option_id")
+  submittedAt      BigInt      @map("submitted_at")
+  timeRemainingSec Float       @map("time_remaining_sec")
+  points           Int         @default(0)
+  isCorrect        Boolean     @default(false) @map("is_correct")
+  session          Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  participant      Participant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  question         Question    @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@id([sessionId, participantId, questionId])
+  @@index([questionId])
+  @@map("session_responses")
+}
