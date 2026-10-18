@@ -1,0 +1,133 @@
+- `BASE = 1000` (configurable per quiz)
+- `time_remaining` = seconds left when submitted (server-measured, not client)
+- Fastest correct answer → up to 1000 pts; last-second correct → near 0
+- Incorrect or timeout → 0 pts
+- Ties broken by: total correct answers → then earlier cumulative answer time
+
+### 3.6 Media Handling
+- Images and audio stored in object storage (S3-compatible).
+- Host uploads via pre-signed URL.
+- Students stream audio via signed CDN URL.
+
+### 3.7 Anti-Cheat / Fairness (basic)
+- Server-side timer authority (client timer is cosmetic).
+- One answer per student per question (DB unique constraint).
+- Answers accepted only while question state = `OPEN`.
+
+---
+
+## 4. Non-Functional Requirements
+
+| Category      | Requirement |
+|---------------|-------------|
+| Latency       | Question push → student screen < 500 ms p95 |
+| Concurrency   | MVP: 200 students per session, 50 concurrent sessions |
+| Availability  | 99.5% uptime target |
+| Security      | JWT auth, HTTPS, role-based access control, signed media URLs |
+| Scalability   | Stateless API + Redis pub/sub for real-time fan-out |
+| Accessibility | Keyboard-navigable, alt text on images, audio captions optional |
+| Browsers      | Latest Chrome, Firefox, Safari, Edge (mobile + desktop) |
+
+---
+
+## 5. Tech Stack (Proposed)
+
+| Layer         | Choice |
+|---------------|--------|
+| Frontend      | React + TypeScript, TailwindCSS, Vite |
+| Realtime      | WebSocket (Socket.IO or native WS) |
+| Backend       | Node.js (NestJS or Express) + TypeScript |
+| Database      | PostgreSQL |
+| Cache/PubSub  | Redis |
+| Media Storage | S3-compatible (AWS S3 / MinIO / Cloudflare R2) |
+| Auth          | JWT (host), session token (student) |
+| Deployment    | Docker + Fly.io / Railway / AWS ECS |
+
+*(Swap freely — the architecture file is stack-agnostic in structure.)*
+
+---
+
+## 6. Data Model (Core Entities)
+
+- **User** (id, email, password_hash, role='host', created_at)
+- **Quiz** (id, host_id, title, description, base_points, created_at)
+- **Question** (id, quiz_id, order_index, prompt, image_url, audio_url, time_limit_sec, created_at)
+- **AnswerOption** (id, question_id, text, is_correct)
+- **Session** (id, quiz_id, host_id, code, status[Lobby|Live|Ended], started_at, ended_at)
+- **Participant** (id, session_id, display_name, joined_at, total_score)
+- **Response** (id, participant_id, question_id, option_id, submitted_at, time_remaining, points_awarded)
+  - UNIQUE(participant_id, question_id)
+
+---
+
+## 7. API Surface (High-Level)
+
+### Auth
+- `POST /auth/host/register`
+- `POST /auth/host/login`
+- `POST /session/join` (body: code, display_name) → returns participant token
+
+### Host
+- `POST /quizzes` / `GET /quizzes` / `PUT /quizzes/:id` / `DELETE /quizzes/:id`
+- `POST /quizzes/:id/questions` (+ media upload URLs)
+- `POST /sessions` → create live session (returns code)
+- `POST /sessions/:id/start`
+- `POST /sessions/:id/next-question`
+- `POST /sessions/:id/end`
+- `GET /sessions/:id/leaderboard` (live)
+
+### Student
+- `GET /sessions/:id/state` → current phase
+- `GET /sessions/:id/current-question` → prompt + media + options (no correct flag)
+- `POST /sessions/:id/answer` (body: question_id, option_id)
+
+### WebSocket Events
+- Server → Client: `session:started`, `question:open`, `question:closed`, `leaderboard:update`, `session:ended`
+- Client → Server: `answer:submit` (fallback if REST not used)
+
+---
+
+## 8. User Flows
+
+### Host Flow
+1. Login → Dashboard → Create Quiz
+2. Add questions (text + image + audio + options + correct + timer)
+3. Launch session → share code
+4. Live view = leaderboard + controls only
+5. Advance questions → end session → see results
+
+### Student Flow
+1. Open link → enter name → lobby
+2. Question appears (image + audio) → choose answer before timer
+3. See own result → next question
+4. Final leaderboard
+
+---
+
+## 9. Edge Cases
+- Student joins mid-session → starts from current question, previous scores = 0
+- Student disconnects → can rejoin with same name + session (token-based)
+- Host disconnects → session pauses; resumes on reconnect (state in Redis/DB)
+- Audio autoplay blocked by browser → show tap-to-play button
+- Duplicate answer submission → rejected (409)
+- Session code collision → regenerate
+
+---
+
+## 10. MVP Milestones
+1. Auth + quiz CRUD
+2. Media upload + question builder UI
+3. Session lifecycle + WebSocket sync
+4. Student live quiz UI + answer submission
+5. Scoring + leaderboard
+6. Host leaderboard-only view
+7. Polish + deploy
+
+---
+
+## 11. Open Questions (to confirm)
+- Should students require accounts, or is name-only join acceptable?
+- Max students per session target?
+- Audio: playback once, or replayable?
+- Should host see correct-answer distribution live (currently: no)?
+- Monetization / free-tier limits?

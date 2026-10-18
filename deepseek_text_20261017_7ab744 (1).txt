@@ -1,0 +1,18 @@
+
+---
+
+## 5. Security Architecture
+
+| Concern | Mitigation |
+|---------|-----------|
+| Role separation | JWT with `role` claim; middleware guards `/host/*` and `/student/*` routes |
+| Host privacy during live | `/sessions/:id/current-question` returns content **only** to student tokens; host token gets a stripped payload |
+| Media access | Pre-signed URLs with short TTL (e.g., 15 min) |
+| Answer integrity | Server-side timer; reject answers after `deadline`; unique constraint on (participant, question) |
+| Session code abuse | 6-digit code + rate limiting on join attempts; optional session password |
+| Transport | HTTPS/WSS enforced; HSTS |
+| Secrets | Env vars / secret manager |
+
+---
+
+## 6. Deployment Topology

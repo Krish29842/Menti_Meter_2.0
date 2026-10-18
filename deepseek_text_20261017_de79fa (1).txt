@@ -1,0 +1,6 @@
+
+- **Redis Pub/Sub** decouples pods: any pod handling a WS client subscribes to the session channel.
+- **Session lock** (Redis `SETNX` with TTL) ensures only one pod drives state transitions (start, next-question, close).
+- **Timers**: question close timer stored in Redis (`SET question:{id}:deadline`); a worker or scheduled job closes it, broadcasting `question:closed`.
+
+### Event Flow — Question Lifecycle

@@ -1,0 +1,27 @@
+- **Sticky sessions not required** — WS clients can land on any pod thanks to Redis Pub/Sub.
+- **Scaling**: add backend pods; Redis and Postgres scale vertically initially.
+- **Failure recovery**: sessions persisted in Postgres; Redis rebuilt from DB on cold start (state snapshot every N seconds).
+
+---
+
+## 7. Key Design Decisions & Trade-offs
+
+| Decision | Rationale | Trade-off |
+|----------|-----------|-----------|
+| WebSocket over polling | Sub-500ms updates, cheaper at scale | More infra complexity (pub/sub) |
+| Redis Sorted Set for leaderboard | O(log n) updates, instant ranking | Must reconcile with DB on end |
+| Server-authoritative timers | Fairness / anti-cheat | Slight clock-skew handling needed |
+| Name-only student join (MVP) | Zero friction for classroom use | No cross-session identity |
+| Separate host/student SPA routes (same codebase) | Shared components, simpler deploys | Slightly larger bundle; can split later |
+| Direct-to-S3 uploads | Offloads backend, faster uploads | Requires CORS + signed URL handling |
+
+---
+
+## 8. Future Extensions (post-MVP)
+- Polls / word clouds / open text questions
+- Team mode & group leaderboards
+- Question bank + templates
+- Analytics dashboard for hosts (post-session)
+- Mobile PWA / native apps
+- Multi-language UI
+- Live chat / reactions during quiz
